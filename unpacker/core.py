@@ -34,12 +34,16 @@ class FileView:
     def __init__(self, path: str):
         self.path = path
         self._f = open(path, "rb")
-        self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
+        if os.fstat(self._f.fileno()).st_size == 0:      # 空文件不能 mmap
+            self._mm = b""
+        else:
+            self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
         self.size = len(self._mm)
 
     def close(self):
         try:
-            self._mm.close()
+            if not isinstance(self._mm, bytes):
+                self._mm.close()
         finally:
             self._f.close()
 
@@ -75,21 +79,24 @@ class Archive:
     def read(self, entry: Entry) -> bytes:
         segments = entry.meta.get("segments")
         if segments:
-            return self._read_segments(segments)
-        data = self.view.bytes(entry.offset, entry.size)
+            parts = []
+            for compressed, off, size, packed in segments:
+                chunk = self.view.bytes(off, packed if compressed else size)
+                chunk = self._post(entry, chunk)
+                if compressed:
+                    import zlib
+                    chunk = zlib.decompress(chunk)
+                parts.append(chunk)
+            return b"".join(parts)
+        return self._post(entry, self.view.bytes(entry.offset, entry.size))
+
+    def _post(self, entry: Entry, data: bytes) -> bytes:
         if entry.meta.get("aff"):
             data = unwrap_aff(data)
+        key = entry.meta.get("xor_key")
+        if key:
+            data = xor_bytes(data, key)
         return data
-
-    def _read_segments(self, segments) -> bytes:
-        import zlib
-        parts = []
-        for compressed, off, size, packed in segments:
-            chunk = self.view.bytes(off, packed if compressed else size)
-            if compressed:
-                chunk = zlib.decompress(chunk)
-            parts.append(chunk)
-        return b"".join(parts)
 
     def close(self):
         self.view.close()
@@ -110,7 +117,7 @@ class ZipArchive(Archive):
         self._zf = zf
 
     def read(self, entry: Entry) -> bytes:
-        return self._zf.read(entry.meta["zip_name"])
+        return self._zf.read(entry.meta.get("zip_info") or entry.meta["zip_name"])
 
     def close(self):
         try:
@@ -134,40 +141,64 @@ def unwrap_aff(data: bytes) -> bytes:
     return bytes(body)
 
 
+def xor_bytes(data: bytes, key: bytes) -> bytes:
+    """循环异或（pf8 这类用它加密正文），用大整数一次算完，比逐字节快得多"""
+    if not data or not key:
+        return data
+    n = len(data)
+    full = (key * (n // len(key) + 1))[:n]
+    return (int.from_bytes(data, "big") ^ int.from_bytes(full, "big")).to_bytes(n, "big")
+
+
 # ---------------------------------------------------------------- 文本解码
 _HALF_KANA = range(0xFF61, 0xFFA0)
 
 
 def _score(text: str) -> int:
+    """给一段解码结果打分：假名权重最高，因为把 SJIS 当 GBK 解出来的全是生僻汉字"""
     s = 0
     for ch in text:
         o = ord(ch)
-        if o in _HALF_KANA:
-            s -= 4
+        if o in _HALF_KANA:              # 半角假名：基本可以断定解错了
+            s -= 6
+        elif 0x3041 <= o <= 0x3096:      # 平假名
+            s += 4
+        elif 0x30A1 <= o <= 0x30FA:      # 全角片假名
+            s += 3
         elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF:
-            s += 2
-        elif 0x3040 <= o <= 0x30FF:
             s += 1
-        elif 0xFF01 <= o <= 0xFF60:
+        elif 0xFF01 <= o <= 0xFF60:      # 全角符号
             s += 1
-        elif o < 0x80:
+        elif o < 0x80:                   # ASCII
             s += 1
         else:
-            s -= 1
+            s -= 2
     return s
 
 
 def smart_decode(raw: bytes) -> str:
-    """日文/中文补丁包混在一起，选一个最像人话的编码"""
-    best, best_score = "", -10 ** 9
-    for enc in ("utf-8", "gbk", "cp932", "euc_jp", "latin-1"):
+    """日文/中文补丁混在一起，挑一个最像人话的编码
+
+    规则：
+      1. 能严格按 UTF-8 解出来且带非 ASCII 字符 → 就是 UTF-8（这个几乎不会误判）
+      2. 剩下的按字符得分比，同分时优先 cp932（galgame 里日文名远多于中文名）
+    """
+    candidates = []
+    for enc in ("cp932", "gbk", "euc_jp"):
         try:
-            text = raw.decode(enc)
+            candidates.append((enc, raw.decode(enc)))
         except UnicodeDecodeError:
             continue
-        if enc == "latin-1":
-            break  # 兜底放最后
-        sc = _score(text)
-        if sc > best_score:
-            best, best_score = text, sc
-    return best
+
+    try:
+        text = raw.decode("utf-8")
+        if any(ord(c) > 127 for c in text):
+            return text
+    except UnicodeDecodeError:
+        pass
+
+    if not candidates:
+        return raw.decode("latin-1")
+
+    best = max(candidates, key=lambda kv: _score(kv[1]))
+    return best[1]

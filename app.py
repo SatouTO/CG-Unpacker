@@ -1,4 +1,4 @@
-"""CG Unpacker - 图形界面 v1.2
+"""游戏图片解包器 - 图形界面 v1.2
 
 重点是：高清（DPI 感知）、可以一张一张挑着解、拖进来只打开不自动解。
 """
@@ -16,7 +16,8 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 import unpacker  # noqa: F401  (导入即注册所有格式)
-from unpacker import ExtractContext, ExtractOptions, decode_image, extract
+from unpacker import ExtractContext, ExtractOptions, extract
+from unpacker.extract import read_entry
 from unpacker.registry import archive_formats, open_archive_ex
 
 try:                                    # 拖拽支持，缺这个包也不影响其他功能
@@ -28,9 +29,10 @@ except Exception:                       # noqa: BLE001
     _TK_BASE = tk.Tk
     HAS_DND = False
 
-APP_NAME = "CG Unpacker"
-APP_VER = "1.2"
-ARCHIVE_EXTS = {".afa", ".ald", ".xp3", ".zip", ".pak", ".dat", ".arc", ".bin", ".exe"}
+APP_NAME = "游戏图片解包器"
+APP_VER = "1.3"
+ARCHIVE_EXTS = {".afa", ".ald", ".xp3", ".zip", ".pak", ".dat", ".arc", ".bin", ".exe",
+                ".ypf", ".npa", ".pfs", ".pf6", ".pf7", ".pf8", ".g00"}
 
 # ---------------------------------------------------------------- 配色
 BG = "#f2f4f8"
@@ -76,6 +78,15 @@ def human_size(n: int) -> str:
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KB"
     return f"{n / 1024 / 1024:.2f} MB"
+
+
+def _hex_head(path: str, n: int = 32) -> str:
+    try:
+        with open(path, "rb") as f:
+            data = f.read(n)
+    except Exception as e:
+        return f"(读取失败: {e})"
+    return " ".join(f"{b:02X}" for b in data)
 
 
 def rounded_rect(cv: tk.Canvas, x1, y1, x2, y2, r, **kw):
@@ -167,6 +178,9 @@ class App(_TK_BASE):
         self.rows = []
         self._photo = None
         self._preview_token = 0
+        self._preview_archive = None  # 正在被预览线程读取的包；回到 UI 线程后再关闭
+        self._pending_preview = None
+        self._closing = False
         self.queue = queue.Queue()
         self.stop_event = threading.Event()
         self.busy = False
@@ -188,6 +202,7 @@ class App(_TK_BASE):
         self._build_menu()
         self._build_ui()
         self.after(80, self._poll)
+        self.after_idle(self.lift)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _dpi_scale(self) -> float:
@@ -422,6 +437,8 @@ class App(_TK_BASE):
             self.after(10, lambda: self._handle_dropped(paths))
 
     def _handle_dropped(self, paths: list[str]):
+        if self._closing:
+            return
         if self.busy:
             messagebox.showinfo(APP_NAME, "正在解包，等这一轮跑完再拖新的吧")
             return
@@ -470,12 +487,14 @@ class App(_TK_BASE):
     def choose_file(self):
         path = filedialog.askopenfilename(
             title="打开文件",
-            filetypes=[("资源包", "*.afa *.ald *.xp3 *.zip *.pak *.dat *.arc *.bin"),
+            filetypes=[("资源包", "*.afa *.ald *.xp3 *.zip *.ypf *.npa *.pfs *.pf6 *.pf7 *.pf8 *.g00 *.pak *.dat *.arc *.bin"),
                        ("所有文件", "*.*")])
         if path:
             self.open_file(path)
 
     def open_file(self, path: str) -> bool:
+        if self._closing:
+            return False
         if self.busy:
             messagebox.showinfo(APP_NAME, "正在解包，等这一轮跑完再换包吧")
             return False
@@ -485,9 +504,12 @@ class App(_TK_BASE):
             messagebox.showerror(APP_NAME, f"打开失败：{e}")
             return False
         if archive is None:
-            messagebox.showerror(APP_NAME, f"识别不了这个格式\n\n{err}")
+            head = _hex_head(path)
+            messagebox.showerror(
+                APP_NAME,
+                f"识别不了这个格式\n\n{err}\n\n文件头（前 32 字节）：\n{head}")
             return False
-        if self.archive:
+        if self.archive and self.archive is not self._preview_archive:
             self.archive.close()
         self.archive = archive
         self._refresh_save_path()
@@ -504,6 +526,7 @@ class App(_TK_BASE):
         return True
 
     def refresh_tree(self):
+        self._clear_preview()
         self.tree.delete(*self.tree.get_children())
         self.rows = []
         kw = self.var_filter.get().strip().lower()
@@ -541,8 +564,11 @@ class App(_TK_BASE):
         self.btn_sel.set_enabled(bool(self.archive))
 
     def on_select(self, _event=None):
+        if self._closing:
+            return
         self._update_sel_button()
         sel = self.tree.selection()
+        self._clear_preview()
         if not sel or not self.archive:
             return
         item = sel[0]
@@ -550,18 +576,33 @@ class App(_TK_BASE):
         if idx >= len(self.rows):
             return
         entry = self.rows[idx]
-        self._preview_token += 1
-        token = self._preview_token
+        self._pending_preview = entry
         self.lbl_info.configure(text=f"解码中 {entry.name} …")
+        self._start_pending_preview()
+
+    def _clear_preview(self):
+        self._preview_token += 1
+        self._pending_preview = None
+        self._preview_img = self._photo = None
+        self.canvas.delete("all")
+        self.lbl_info.configure(text="在左边选一张看看")
+
+    def _start_pending_preview(self):
+        if self._preview_archive is not None or self._pending_preview is None:
+            return
+        archive, ctx = self.archive, self.ctx
+        token, entry = self._preview_token, self._pending_preview
+        self._preview_archive = archive
+        self._pending_preview = None
 
         def work():
             try:
-                data = self.archive.read(entry)
-                img, desc = decode_image(data, self.ctx)
+                _, img, desc = read_entry(archive, entry, ctx)
             except Exception as e:
-                self.queue.put(("preview_err", token, f"{type(e).__name__}: {e}"))
-                return
-            self.queue.put(("preview", token, entry, img, desc))
+                result = ("preview", token, entry, None, "", f"{type(e).__name__}: {e}")
+            else:
+                result = ("preview", token, entry, img, desc, None)
+            self.queue.put(result)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -669,12 +710,12 @@ class App(_TK_BASE):
         self._start_extract(sel, f"{len(sel)} 个文件", target)
 
     def _start_extract(self, entries, label, out_dir):
-        if self.busy:
+        if self.busy or self._closing:
             return
-        os.makedirs(out_dir, exist_ok=True)
         self._display_save_path("保存路径", out_dir)
         opts = ExtractOptions(
             out_dir=out_dir,
+            base_dir=self.out_dir,
             only_images=self.var_only_img.get(),
             convert_png=self.var_png.get(),
             should_stop=self.stop_event.is_set,
@@ -716,9 +757,8 @@ class App(_TK_BASE):
         self._start_batch(files, base)
 
     def _start_batch(self, files, base_dir):
-        if self.busy:
+        if self.busy or self._closing:
             return
-        os.makedirs(base_dir, exist_ok=True)
         self._display_save_path("批量保存路径", base_dir)
         self.stop_event.clear()
         self._set_busy(True)
@@ -745,6 +785,7 @@ class App(_TK_BASE):
                     stem = os.path.splitext(os.path.basename(f))[0]
                     opts = ExtractOptions(
                         out_dir=os.path.join(base_dir, stem),
+                        base_dir=base_dir,
                         only_images=only_img,
                         convert_png=png,
                         should_stop=stop,
@@ -778,15 +819,7 @@ class App(_TK_BASE):
         if not item:
             return
         self.tree.selection_set(item)
-        sel = self._selected_entries()
-        if not sel:
-            return
-        if self.busy:
-            return
-        target = self._ask_target()
-        if not target:
-            return
-        self._start_extract(sel[:1], "这一张", target)
+        self._extract_item(item)
 
     def _context_menu(self, event):
         item = self.tree.identify_row(event.y)
@@ -796,20 +829,20 @@ class App(_TK_BASE):
             self.tree.selection_set(item)
         n = len(self.tree.selection())
         m = tk.Menu(self, tearoff=0)
-        m.add_command(label="解包这一张", command=lambda: self._extract_items(1))
+        m.add_command(label="解包这一张", command=lambda: self._extract_item(item))
         m.add_command(label=f"解包选中的 {n} 张", command=self.extract_selected)
         m.add_separator()
         m.add_command(label="复制文件名", command=self._copy_name)
         m.tk_popup(event.x_root, event.y_root)
 
-    def _extract_items(self, count: int):
-        sel = self._selected_entries()[:count]
-        if not sel or not self.archive or self.busy:
+    def _extract_item(self, item):
+        if self.busy or not self.archive or not self.tree.exists(item):
             return
+        entry = self.rows[self.tree.index(item)]
         target = self._ask_target()
         if not target:
             return
-        self._start_extract(sel, "这一张", target)
+        self._start_extract([entry], "这一张", target)
 
     def _copy_name(self):
         sel = self._selected_entries()
@@ -828,13 +861,16 @@ class App(_TK_BASE):
                     self.progress.configure(maximum=max(1, total), value=done)
                     self.set_status(f"处理中 {done}/{total}  {name}")
                 elif kind == "preview":
-                    _, token, entry, img, desc = msg
+                    _, token, entry, img, desc, error = msg
+                    if self._preview_archive is not self.archive:
+                        self._preview_archive.close()
+                    self._preview_archive = None
                     if token == self._preview_token:
-                        self._show_preview(entry, img, desc)
-                elif kind == "preview_err":
-                    _, token, text = msg
-                    if token == self._preview_token:
-                        self.lbl_info.configure(text=f"预览失败：{text}")
+                        if error:
+                            self.lbl_info.configure(text=f"预览失败：{error}")
+                        else:
+                            self._show_preview(entry, img, desc)
+                    self._start_pending_preview()
                 elif kind == "log":
                     self.log_line(msg[1])
                 elif kind == "done":
@@ -845,7 +881,7 @@ class App(_TK_BASE):
                         self.log_line(f"  ! {err}")
                     self.set_status(f"完成：{stats.summary()}")
                     self._set_busy(False)
-                    if messagebox.askyesno(APP_NAME, f"解包完成\n\n{stats.summary()}\n\n保存路径\n{out_dir}\n\n打开目录看看？"):
+                    if not self._closing and messagebox.askyesno(APP_NAME, f"解包完成\n\n{stats.summary()}\n\n保存路径\n{out_dir}\n\n打开目录看看？"):
                         os.startfile(out_dir)  # noqa: S606
                 elif kind == "batch_done":
                     _, ok, total, imgs, base_dir = msg
@@ -853,13 +889,20 @@ class App(_TK_BASE):
                     self.log_line(f"批量完成：{ok}/{total} 个包，共 {imgs} 张图")
                     self.set_status(f"批量完成：{ok}/{total} 个包")
                     self._set_busy(False)
-                    messagebox.showinfo(APP_NAME, f"批量解包完成\n{ok}/{total} 个包，共导出 {imgs} 张图\n\n批量保存路径\n{base_dir}")
+                    if not self._closing:
+                        messagebox.showinfo(APP_NAME, f"批量解包完成\n{ok}/{total} 个包，共导出 {imgs} 张图\n\n批量保存路径\n{base_dir}")
                 elif kind == "error":
                     self._set_busy(False)
                     self.log_line("出错了：\n" + msg[1])
-                    messagebox.showerror(APP_NAME, "解包过程出错了，详情看下面日志")
+                    if not self._closing:
+                        messagebox.showerror(APP_NAME, "解包过程出错了，详情看下面日志")
         except queue.Empty:
             pass
+        if self._closing and not self.busy and self._preview_archive is None:
+            if self.archive:
+                self.archive.close()
+            self.destroy()
+            return
         self.after(80, self._poll)
 
     # ------------------------------------------------------------ 杂项
@@ -881,13 +924,13 @@ class App(_TK_BASE):
                                     "引擎：unpacker（Python + Pillow）")
 
     def _on_close(self):
-        try:
-            self._save_config()
-        except Exception:
-            pass
-        if self.archive:
-            self.archive.close()
-        self.destroy()
+        if self._closing:
+            return
+        self._closing = True
+        self.stop_event.set()
+        self._clear_preview()
+        self._save_config()
+        self.withdraw()  # 由消息泵等当前文件写完、预览读完，再关闭归档和 Tk。
 
 
 def main():

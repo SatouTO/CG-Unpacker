@@ -1,4 +1,4 @@
-CG Unpacker v1.2  —— 使用说明
+CG Unpacker v1.3  —— 使用说明
 ==================================
 
 一、怎么打开
@@ -28,11 +28,11 @@ CG Unpacker v1.2  —— 使用说明
   批量保存路径会显示在窗口中，每个包各用一个子文件夹
 
 五、支持的格式
-  归档：AFA(AliceSoft v1/v2/v3)、ALD(AliceSoft)、XP3(KiriKiri)、ZIP
-  图片：QNT、DCF、AJP，以及 PNG/JPG/BMP/WebP/GIF
+  归档：AFA(AliceSoft v1/v2/v3)、ALD(AliceSoft)、XP3（含 EXE 内嵌）、ZIP、YPF、NPA、PFS、RealLive G00
+  图片：QNT、DCF、AJP、G00、TLG5、部分 TLG6，以及 PNG/JPG/BMP/WebP/GIF
 
 六、常见问题
-  · 界面模糊：v1.2 起已经做了 DPI 感知，系统缩放 125%/150%/200% 下都是清晰的
+  · 界面模糊：v1.3 起已经做了 DPI 感知，系统缩放 125%/150%/200% 下都是清晰的
   · 拖进去没反应：确认拖的是文件不是文件夹
   · 提示「识别不了这个格式」：加密包或者还没支持的引擎
   · 解出来空白/花屏：少数游戏对图片二次加密了

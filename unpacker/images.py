@@ -29,7 +29,7 @@ def _u32(b, o):
 # ---------------------------------------------------------------- QNT
 def qnt_decode(d: bytes):
     """返回 (width, height, bpp, bgra_bytes)，bpp 为 3 或 4"""
-    if d[:4] != b"QNT\x00":
+    if d[:4] != b"QNT\x00" or len(d) < 0x30:
         return None
     ver = _i32(d, 4)
     if ver == 0:
@@ -122,7 +122,7 @@ def _rot_l(v: int, s: int) -> int:
 
 def dcf_decode(d: bytes, base_lookup=None):
     """差分图：叠加在底图 QNT 上，返回 (w, h, bpp, bgra)"""
-    if d[:4] != b"dcf ":
+    if d[:4] != b"dcf " or len(d) < 0x20:
         return None
     hs = _u32(d, 4)
     dp = 8 + hs
@@ -233,7 +233,7 @@ def _dcf(data, ctx):
 # ---------------------------------------------------------------- AJP
 @register_image("AJP (AliceSoft JPEG)")
 def _ajp(data, ctx):
-    if data[:4] != b"AJP\x00":
+    if data[:4] != b"AJP\x00" or len(data) < 0x28:
         return None
     ver = _i32(data, 4)
     w, h = _u32(data, 0x0C), _u32(data, 0x10)

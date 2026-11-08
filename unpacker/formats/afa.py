@@ -218,7 +218,7 @@ def _v12_entries(view) -> list[Entry] | None:
 
 @register_archive("AFA", "AliceSoft AFA (v1/v2/v3)")
 def detect(view):
-    if view.bytes(0, 4) != MAGIC:
+    if view.size < 0x30 or view.bytes(0, 4) != MAGIC:
         return None
     if view.bytes(8, 8) == b"AlicArch":
         return _v12_entries(view)

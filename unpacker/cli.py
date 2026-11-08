@@ -8,12 +8,12 @@ import glob
 import os
 import sys
 
-from .extract import ExtractOptions, extract_file
+from .extract import ExtractOptions, extract
 from .registry import archive_formats, open_archive_ex
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser("unpacker", description="CG Unpacker（命令行）")
+    ap = argparse.ArgumentParser("unpacker", description="游戏图片解包器（命令行）")
     ap.add_argument("files", nargs="*", help="归档文件，支持通配符")
     ap.add_argument("-o", "--out", default="output", help="输出目录")
     ap.add_argument("--list", action="store_true", help="只列出内容，不解包")
@@ -59,6 +59,7 @@ def main(argv=None):
                 continue
             opts = ExtractOptions(
                 out_dir=os.path.join(args.out, os.path.splitext(os.path.basename(path))[0]),
+                base_dir=args.out,
                 only_images=not args.all,
                 convert_png=not args.no_png,
                 flatten=args.flat,
@@ -68,11 +69,16 @@ def main(argv=None):
                 if total and done % 25 == 0:
                     print(f"\r  {done}/{total}", end="", file=sys.stderr)
 
-            stats = extract_file(path, opts, report)
+            stats = extract(archive, archive.entries, opts, report)
             print(f"  -> {opts.out_dir}")
             print(f"  {stats.summary()}")
             for err in stats.errors[:5]:
                 print(f"  ! {err}", file=sys.stderr)
+            if stats.failed:
+                rc = 1
+        except (OSError, ValueError) as e:
+            print(f"[失败] {path}: {e}", file=sys.stderr)
+            rc = 1
         finally:
             archive.close()
     return rc

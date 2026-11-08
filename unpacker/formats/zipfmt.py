@@ -20,7 +20,7 @@ def detect(view):
         entries.append(Entry(
             info.filename, 0, info.compress_size,
             unpacked=info.file_size,
-            meta={"zip_name": info.filename},
+            meta={"zip_name": info.filename, "zip_info": info},
         ))
     if not entries:
         zf.close()

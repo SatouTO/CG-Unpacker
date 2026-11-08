@@ -1,56 +1,42 @@
-# CG Unpacker v1.2
+# CG Unpacker v1.3
 
-在 Windows 上打开游戏资源包、预览图片，挑选单张或多张导出。可以保留原文件，也可以将支持的图片转换为 PNG。
+Windows 游戏资源包图片预览与解包工具。下载 Windows x64 压缩包，完整解压后运行 `CG Unpacker.exe`，并保持 `_internal` 文件夹与它同级。[下载 v1.3](https://github.com/SatouTO/CG-Unpacker/releases/download/v1.3/CG-Unpacker-v1.3-Windows-x64.zip) · [更新记录](CHANGELOG.md)
 
-## 下载 Windows 版
+## 使用
 
-下载 `CG-Unpacker-v1.2-Windows-x64.zip`，完整解压后双击 `CG Unpacker.exe`。程序自带运行环境，请将 `_internal` 文件夹与 EXE 放在同一目录。[下载 Windows x64 版](https://github.com/SatouTO/CG-Unpacker/releases/download/v1.2/CG-Unpacker-v1.2-Windows-x64.zip) · [所有版本](https://github.com/SatouTO/CG-Unpacker/releases)
-
-## 打开与导出
-
-1. 点 **打开文件** 或按 **Ctrl+O** 选择一个资源包，也可以拖一个资源包进窗口。左侧会列出包内文件，选中图片可在右侧预览。
-2. 按住 **Ctrl** 加选，或按住 **Shift** 连选，然后点 **解包选中**。双击某一行会导出该文件。需要导出整包时，点 **全部解包**。
-3. 查看解包按钮下方的保存路径。勾选 **解包时问保存位置** 后，单个资源包会直接导出到本次选择的目录。取消勾选后，路径栏会显示默认目录下以包名命名的子文件夹。点 **更改目录…** 可选择新的默认位置。
-4. 点 **批量解包文件夹** 可扫描一个目录里的多个资源包。确认后，每个包会导出到批量保存目录下各自的子文件夹。
-
-勾选 **只要图片** 可过滤其他文件。勾选 **转成 PNG** 会转换可解码的图片。更多操作见[使用说明](使用说明.txt)。
+1. 点“打开文件”或按 Ctrl+O 选择资源包，也可以拖一个文件进窗口。
+2. 选中条目可预览图片。用 Ctrl 或 Shift 多选后点“解包选中”，或者直接双击某一张导出。
+3. 解包按钮下方显示保存路径。勾选“解包时问保存位置”可在每次导出前选目录；关闭后，单包会导出到默认目录下与资源包同名的子文件夹。
+4. 用“批量解包文件夹”处理多个资源包。每个包有独立的输出子文件夹。[使用说明](使用说明.txt)
 
 ## 支持的格式
 
-| 资源包 | 支持范围 |
+| 类型 | 格式 |
 | --- | --- |
-| AFA | AliceSoft AFA v1、v2、v3 |
-| ALD | AliceSoft System 3/4 |
-| XP3 | KiriKiri XP3，支持未加密索引 |
-| ZIP | 普通 ZIP 和使用其他扩展名的 ZIP |
+| 资源包 | AFA、ALD、XP3（含 EXE 内嵌）、ZIP、YPF、NPA、PFS、RealLive G00 |
+| 图片 | QNT、DCF、AJP、G00、TLG5、部分 TLG6，以及 PNG、JPEG、BMP、WebP、GIF |
 
-可预览和转换的图片包括 AliceSoft 的 QNT、DCF、AJP，以及 PNG、JPG、BMP、WebP、GIF。DCF 可使用同包里的底图合成完整画面。
+加密支持依格式与游戏而异。可在“工具 → 支持的格式”查看当前版本可识别的资源包。
 
 ## 从源码运行
 
-Windows 上可使用带 Tk 的 Python 3.12。在源码目录执行以下命令。Pillow 用于图片解码，tkinterdnd2 提供拖拽支持。
+使用带 Tk 的 64 位 Python 3.12，在项目目录执行以下命令。
 
 ```powershell
 py -3.12 -m pip install Pillow tkinterdnd2
 py -3.12 main.pyw
-```
-
-命令行提供格式查询、文件列表和导出操作。
-
-```powershell
 py -3.12 -m unpacker.cli --formats
 py -3.12 -m unpacker.cli "CG.afa" --list
-py -3.12 -m unpacker.cli "CG.afa" -o "输出目录"
-py -3.12 -m unpacker.cli "*.afa" -o "输出目录" --all
 ```
 
-## 构建 Windows x64 程序
+## 构建 Windows 下载包
 
-在安装了上述依赖的 64 位 Python 环境中执行以下命令。
+在已装好上述依赖、可直接执行 `python` 的环境中运行以下命令。
 
 ```powershell
-py -3.12 -m pip install PyInstaller
-py -3.12 -m PyInstaller --noconfirm --onedir --windowed --name "CG Unpacker" --icon icon.ico --collect-data tkinterdnd2 main.pyw
+python -m pip install PyInstaller
+.\build.ps1
 ```
 
-构建结果在 `dist\CG Unpacker\` 中。分发时将整个目录连同[使用说明](使用说明.txt)一起压缩。
+`dist` 目录内会生成 Windows x64 ZIP 和同名的 `.sha256` 校验文件。
+
