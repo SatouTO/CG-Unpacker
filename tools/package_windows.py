@@ -20,8 +20,10 @@ def package(folder: Path, version: str, guide: Path) -> Path:
         stream.seek(struct.unpack("<I", stream.read(4))[0])
         if stream.read(6) != b"PE\x00\x00\x64\x86":
             raise ValueError("Expected Windows x64 EXE")
-    if not (folder / "_internal" / "python312.dll").is_file():
-        raise ValueError("Missing Python 3.12 runtime")
+    required = ("python312.dll", "_tkinter.pyd", "_tcl_data/init.tcl", "_tk_data/tk.tcl")
+    for member in required:
+        if not (folder / "_internal" / member).is_file():
+            raise ValueError(f"Missing Windows GUI runtime file: {member}")
     shutil.copyfile(guide, folder / "使用说明.txt")
     licenses = folder / "licenses"
     licenses.mkdir(exist_ok=True)
@@ -52,4 +54,4 @@ def package(folder: Path, version: str, guide: Path) -> Path:
 
 
 if __name__ == "__main__":
-    print(package(Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])))
+    print(package(Path(sys.argv[1]), sys.argv[2], Path(__file__).resolve().parents[1] / "使用说明.txt"))

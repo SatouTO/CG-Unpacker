@@ -1,6 +1,10 @@
-# CG Unpacker v1.3
+# CG Unpacker v1.4
 
-Windows 游戏资源包图片预览与解包工具。下载 Windows x64 压缩包，完整解压后运行 `CG Unpacker.exe`，并保持 `_internal` 文件夹与它同级。[下载 v1.3](https://github.com/SatouTO/CG-Unpacker/releases/download/v1.3/CG-Unpacker-v1.3-Windows-x64.zip) · [更新记录](CHANGELOG.md)
+Windows 游戏资源包图片预览与解包工具。下载 Windows x64 压缩包，完整解压后运行 `CG Unpacker.exe`，并保持 `_internal` 文件夹与它同级。[下载 v1.4](https://github.com/SatouTO/CG-Unpacker/releases/download/v1.4/CG-Unpacker-v1.4-Windows-x64.zip) · [更新记录](CHANGELOG.md)
+
+## 软件内更新
+
+从 v1.4 起，点击版本号旁的“检查更新”，或打开“帮助 → 检查更新”。发现新版后可查看更新说明，确认后下载、校验并重启程序。更新会保留用户配置和已导出的文件。使用 v1.3 或更早版本时，先从发布页下载一次 v1.4 Windows 包。
 
 ## 使用
 
@@ -38,5 +42,5 @@ python -m pip install PyInstaller
 .\build.ps1
 ```
 
-`dist` 目录内会生成 Windows x64 ZIP 和同名的 `.sha256` 校验文件。
+`dist` 目录内会生成 Windows x64 ZIP 和同名的 `.sha256` 校验文件。发布时使用对应的稳定版标签（例如 `v1.4`），在同一个 GitHub Release 上传这两个文件，填写本版的变更后发布。
 

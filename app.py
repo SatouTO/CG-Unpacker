@@ -1,4 +1,4 @@
-"""游戏图片解包器 - 图形界面 v1.2
+"""CG Unpacker 图形界面
 
 重点是：高清（DPI 感知）、可以一张一张挑着解、拖进来只打开不自动解。
 """
@@ -7,11 +7,13 @@ import json
 import os
 import queue
 import sys
+import tempfile
 import threading
 import traceback
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
+from pathlib import Path
 
 from PIL import Image, ImageTk
 
@@ -29,8 +31,8 @@ except Exception:                       # noqa: BLE001
     _TK_BASE = tk.Tk
     HAS_DND = False
 
-APP_NAME = "游戏图片解包器"
-APP_VER = "1.3"
+APP_NAME = "CG Unpacker"
+APP_VER = "1.4"
 ARCHIVE_EXTS = {".afa", ".ald", ".xp3", ".zip", ".pak", ".dat", ".arc", ".bin", ".exe",
                 ".ypf", ".npa", ".pfs", ".pf6", ".pf7", ".pf8", ".g00"}
 
@@ -164,6 +166,9 @@ class RoundButton(tk.Canvas):
 
 
 class App(_TK_BASE):
+    _update_cancel = None
+    _update_dialog = None
+
     def __init__(self):
         super().__init__()
         self.sf = self._dpi_scale()
@@ -267,6 +272,9 @@ class App(_TK_BASE):
         m.add_cascade(label="工具", menu=tm)
 
         hm = tk.Menu(m, tearoff=0)
+        hm.add_command(label="检查更新", command=self.check_for_updates)
+        hm.add_command(label="GitHub 发布页", command=self._open_releases)
+        hm.add_separator()
         hm.add_command(label="关于", command=self.show_about)
         m.add_cascade(label="帮助", menu=hm)
         self.config(menu=m)
@@ -284,6 +292,8 @@ class App(_TK_BASE):
                  font=("Microsoft YaHei UI", 13, "bold")).pack(side="left")
         tk.Label(head, text=f"v{APP_VER}", bg=BG, fg=MUTED,
                  font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(8, 0), pady=(3 * sf, 0))
+        self.btn_update = RoundButton(head, "检查更新", self.check_for_updates, "secondary")
+        self.btn_update.pack(side="left", padx=int(10 * sf))
         tk.Label(head, text="拖资源包进窗口，或者点「打开文件」", bg=BG, fg=MUTED,
                  font=("Microsoft YaHei UI", 9)).pack(side="right")
 
@@ -485,6 +495,8 @@ class App(_TK_BASE):
 
     # ------------------------------------------------------------ 打开文件
     def choose_file(self):
+        if self._closing or self._update_dialog is not None:
+            return
         path = filedialog.askopenfilename(
             title="打开文件",
             filetypes=[("资源包", "*.afa *.ald *.xp3 *.zip *.ypf *.npa *.pfs *.pf6 *.pf7 *.pf8 *.g00 *.pak *.dat *.arc *.bin"),
@@ -660,6 +672,8 @@ class App(_TK_BASE):
         self._display_save_path(label, self._suggested_target())
 
     def _ask_target(self, *, batch=False) -> str | None:
+        if self._closing or self._update_dialog is not None:
+            return None
         if not self.var_ask.get():
             return self._suggested_target(batch)
         init = self.out_dir if os.path.isdir(self.out_dir) else app_dir()
@@ -710,7 +724,7 @@ class App(_TK_BASE):
         self._start_extract(sel, f"{len(sel)} 个文件", target)
 
     def _start_extract(self, entries, label, out_dir):
-        if self.busy or self._closing:
+        if self.busy or self._closing or self._update_dialog is not None:
             return
         self._display_save_path("保存路径", out_dir)
         opts = ExtractOptions(
@@ -736,7 +750,7 @@ class App(_TK_BASE):
         threading.Thread(target=work, daemon=True).start()
 
     def choose_folder(self):
-        if self.busy:
+        if self.busy or self._closing or self._update_dialog is not None:
             return
         folder = filedialog.askdirectory(title="选择存放资源包的文件夹")
         if not folder:
@@ -757,7 +771,7 @@ class App(_TK_BASE):
         self._start_batch(files, base)
 
     def _start_batch(self, files, base_dir):
-        if self.busy or self._closing:
+        if self.busy or self._closing or self._update_dialog is not None:
             return
         self._display_save_path("批量保存路径", base_dir)
         self.stop_event.clear()
@@ -856,7 +870,9 @@ class App(_TK_BASE):
             while True:
                 msg = self.queue.get_nowait()
                 kind = msg[0]
-                if kind == "progress":
+                if kind.startswith("update_"):
+                    self._handle_update(msg)
+                elif kind == "progress":
                     _, done, total, name = msg
                     self.progress.configure(maximum=max(1, total), value=done)
                     self.set_status(f"处理中 {done}/{total}  {name}")
@@ -898,12 +914,182 @@ class App(_TK_BASE):
                         messagebox.showerror(APP_NAME, "解包过程出错了，详情看下面日志")
         except queue.Empty:
             pass
-        if self._closing and not self.busy and self._preview_archive is None:
+        if (self._closing and not self.busy and self._preview_archive is None
+                and self._update_cancel is None):
             if self.archive:
                 self.archive.close()
             self.destroy()
             return
         self.after(80, self._poll)
+
+    # ------------------------------------------------------------ 版本更新
+    def _open_releases(self):
+        from updater import RELEASES_URL
+        history = RELEASES_URL.removesuffix("/latest")
+        try:
+            if sys.platform == "win32":
+                os.startfile(history)
+            else:
+                import webbrowser
+                webbrowser.open(history)
+        except OSError:
+            messagebox.showinfo("GitHub 发布页", history, parent=self)
+
+    def check_for_updates(self):
+        if self._closing or self._update_cancel is not None:
+            return
+        if self.busy:
+            messagebox.showinfo("检查更新", "请等当前解包任务完成后再检查更新。", parent=self)
+            return
+        self._update_cancel = threading.Event()
+        self.btn_update.set_text("正在检查…")
+        self.btn_update.set_enabled(False)
+
+        def work():
+            try:
+                from updater import check_update
+                release = check_update(APP_VER)
+                self.queue.put(("update_checked", release))
+            except Exception as exc:
+                self.queue.put(("update_failed", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_update(self):
+        if self._update_dialog is not None:
+            self._update_dialog.destroy()
+            self._update_dialog = None
+        self._update_cancel = None
+        self.btn_update.set_text("检查更新")
+        self.btn_update.set_enabled(True)
+
+    def _report_update_error(self, error):
+        self._finish_update()
+        if messagebox.askyesno("更新失败", f"{error}\n\n打开 GitHub 发布页？", parent=self):
+            self._open_releases()
+
+    def _handle_update(self, msg):
+        cancel = self._update_cancel
+        if cancel is None:
+            return
+        kind, value = msg
+        if kind in ("update_progress", "update_mib", "update_preparing"):
+            if not cancel.is_set():
+                if kind == "update_mib":
+                    if str(self._update_progress.cget("mode")) != "indeterminate":
+                        self._update_progress.configure(mode="indeterminate")
+                        self._update_progress.start()
+                    label = f"正在下载更新，已接收 {value:.1f} MiB"
+                elif kind == "update_preparing":
+                    self._update_progress.stop()
+                    self._update_progress.configure(mode="determinate", value=100)
+                    label = "正在准备安装…"
+                else:
+                    self._update_progress.configure(value=value)
+                    label = f"正在下载更新  {value}%"
+                self._update_label.configure(text=label)
+            return
+        if self._closing or cancel.is_set() or self.busy:
+            if kind == "update_ready":
+                from update_install import discard_update
+                discard_update(value)
+            if self.busy and not self._closing:
+                self.log_line("请在当前解包完成后再次点击「检查更新」。")
+            self._finish_update()
+            return
+        if kind == "update_failed":
+            self._report_update_error(value)
+            return
+        if kind == "update_ready":
+            from update_install import discard_update, launch_update
+            try:
+                launch_update(value)
+            except Exception as exc:
+                discard_update(value)
+                self._report_update_error(exc)
+            else:
+                self._finish_update()
+                self._on_close()
+            return
+        if value is None:
+            self._finish_update()
+            messagebox.showinfo("检查更新", f"当前版本 v{APP_VER}，暂无可安装的新版本。", parent=self)
+            return
+        release = value
+        notes = (release.notes or "").strip()
+        if len(notes) > 700:
+            notes = notes[:700].rstrip() + "…"
+        prompt = f"当前版本 v{APP_VER}　→　新版本 v{release.version}"
+        if notes:
+            prompt += f"\n\n{notes}"
+        if sys.platform != "win32" or not getattr(sys, "frozen", False):
+            self._finish_update()
+            if messagebox.askyesno("发现新版本", prompt + "\n\n打开 GitHub 发布页下载？", parent=self):
+                self._open_releases()
+            return
+        accepted = messagebox.askyesno("发现新版本", prompt + "\n\n立即下载并重启安装？", parent=self)
+        if not accepted or self._closing or cancel.is_set():
+            self._finish_update()
+            return
+        self._download_update(release)
+
+    def _download_update(self, release):
+        from updater import download_update
+        from update_install import prepare_update
+        cancel = self._update_cancel
+        dialog = self._update_dialog = tk.Toplevel(self)
+        dialog.title(f"更新到 v{release.version}")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        self._update_label = ttk.Label(body, text="正在下载更新…")
+        self._update_label.pack(anchor="w")
+        self._update_progress = ttk.Progressbar(body, mode="determinate", maximum=100,
+                                                length=int(265 * self.sf))
+        self._update_progress.pack(fill="x", pady=10)
+
+        def cancel_download():
+            cancel.set()
+            self._update_label.configure(text="正在取消…")
+            button.state(["disabled"])
+        button = ttk.Button(body, text="取消更新", command=cancel_download)
+        button.pack(anchor="e")
+        dialog.protocol("WM_DELETE_WINDOW", cancel_download)
+        dialog.grab_set()
+
+        def work():
+            last_report = None
+
+            def progress(done, total):
+                nonlocal last_report
+                if cancel.is_set():
+                    raise InterruptedError("更新已取消")
+                if total:
+                    report = ("update_progress", min(100, 100 * done // total))
+                else:
+                    report = ("update_mib", round(done / (1 << 20), 1))
+                if report != last_report:
+                    last_report = report
+                    self.queue.put(report)
+
+            prepared = None
+            try:
+                with tempfile.TemporaryDirectory(prefix="CG-Unpacker-download-") as directory:
+                    archive = Path(directory, "update.zip")
+                    download_update(release, archive, progress)
+                    if cancel.is_set():
+                        raise InterruptedError("更新已取消")
+                    self.queue.put(("update_preparing", None))
+                    prepared = prepare_update(archive, app_dir(), os.path.basename(sys.executable))
+                self.queue.put(("update_ready", prepared))
+            except Exception as exc:
+                if prepared is not None:
+                    from update_install import discard_update
+                    discard_update(prepared)
+                self.queue.put(("update_failed", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ 杂项
     def show_formats(self):
@@ -927,6 +1113,8 @@ class App(_TK_BASE):
         if self._closing:
             return
         self._closing = True
+        if self._update_cancel is not None:
+            self._update_cancel.set()
         self.stop_event.set()
         self._clear_preview()
         self._save_config()
