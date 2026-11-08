@@ -31,13 +31,18 @@ class Entry:
 class FileView:
     """把一个归档文件映射进内存，探测器只管读"""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, should_stop=None):
         self.path = path
+        self.should_stop = should_stop
         self._f = open(path, "rb")
-        if os.fstat(self._f.fileno()).st_size == 0:      # 空文件不能 mmap
-            self._mm = b""
-        else:
-            self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            if os.fstat(self._f.fileno()).st_size == 0:      # 空文件不能 mmap
+                self._mm = b""
+            else:
+                self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
+        except Exception:
+            self._f.close()
+            raise
         self.size = len(self._mm)
 
     def close(self):
@@ -49,6 +54,10 @@ class FileView:
 
     def bytes(self, off: int, n: int) -> bytes:
         return self._mm[off:off + n]
+
+    def buffer(self) -> memoryview:
+        """用 with 在映射上搜索大文件，离开后立即释放视图。"""
+        return memoryview(self._mm)
 
     def ascii(self, off: int, n: int) -> str:
         return self.bytes(off, n).decode("latin-1")

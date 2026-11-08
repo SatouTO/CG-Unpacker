@@ -51,6 +51,8 @@ def _find_in_exe(view, magic: bytes) -> int:
     pos = 0
     overlap = len(magic) - 1
     while pos < view.size:
+        if view.should_stop and view.should_stop():
+            return -1
         chunk = view.bytes(pos, min(step, view.size - pos))
         idx = chunk.find(magic)
         if idx >= 0:

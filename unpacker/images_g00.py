@@ -52,7 +52,7 @@ def _copy_overlapped(out: bytearray, src: int, dst: int, count: int):
 
 
 def lz_decompress(buf, pos: int, min_count: int, bytes_pp: int,
-                  max_out: int = MAX_OUT) -> bytes | None:
+                  max_out: int = MAX_OUT, *, max_symbols: int | None = None) -> bytes | None:
     """G00Reader.LzDecompress 的 Python 版；数据坏了返回 None"""
     if pos < 0 or pos + 8 > len(buf):
         return None
@@ -69,6 +69,9 @@ def lz_decompress(buf, pos: int, min_count: int, bytes_pp: int,
     end = pos + 8 + packed
     if end > len(buf):
         return None
+    # 在无索引的 DAT 中验证候选文件头时，只需读出开头几个符号。
+    if max_symbols is not None:
+        out_size = min(out_size, max_symbols * bytes_pp)
 
     src = pos + 8
     out = bytearray(out_size)

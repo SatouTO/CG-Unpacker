@@ -1,5 +1,5 @@
 """游戏图片解包器 —— 插件式归档/图片解码框架"""
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 import importlib
 import pkgutil

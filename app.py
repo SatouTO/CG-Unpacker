@@ -19,8 +19,10 @@ from PIL import Image, ImageTk
 
 import unpacker  # noqa: F401  (导入即注册所有格式)
 from unpacker import ExtractContext, ExtractOptions, extract
+from unpacker.discovery import scan_archives
 from unpacker.extract import read_entry
 from unpacker.registry import archive_formats, open_archive_ex
+from scan_dialog import ScanDialog
 
 try:                                    # 拖拽支持，缺这个包也不影响其他功能
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -32,9 +34,7 @@ except Exception:                       # noqa: BLE001
     HAS_DND = False
 
 APP_NAME = "CG Unpacker"
-APP_VER = "1.4"
-ARCHIVE_EXTS = {".afa", ".ald", ".xp3", ".zip", ".pak", ".dat", ".arc", ".bin", ".exe",
-                ".ypf", ".npa", ".pfs", ".pf6", ".pf7", ".pf8", ".g00"}
+APP_VER = "1.5"
 
 # ---------------------------------------------------------------- 配色
 BG = "#f2f4f8"
@@ -168,6 +168,7 @@ class RoundButton(tk.Canvas):
 class App(_TK_BASE):
     _update_cancel = None
     _update_dialog = None
+    _scan_dialog = None
 
     def __init__(self):
         super().__init__()
@@ -189,6 +190,8 @@ class App(_TK_BASE):
         self.queue = queue.Queue()
         self.stop_event = threading.Event()
         self.busy = False
+        self._scan_results = []
+        self._scan_root = ""
         self.config_data = self._load_config()
         self.out_dir = os.path.abspath(self.config_data.get("out_dir") or os.path.join(app_dir(), "output"))
         self._sash_done = False
@@ -260,7 +263,7 @@ class App(_TK_BASE):
         m = tk.Menu(self)
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="打开文件", accelerator="Ctrl+O", command=self.choose_file)
-        fm.add_command(label="批量解包文件夹…", accelerator="Ctrl+B", command=self.choose_folder)
+        fm.add_command(label="扫描文件夹…", accelerator="Ctrl+B", command=self.choose_folder)
         fm.add_separator()
         fm.add_command(label="打开默认目录", command=self.open_out_dir)
         fm.add_separator()
@@ -294,7 +297,7 @@ class App(_TK_BASE):
                  font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(8, 0), pady=(3 * sf, 0))
         self.btn_update = RoundButton(head, "检查更新", self.check_for_updates, "secondary")
         self.btn_update.pack(side="left", padx=int(10 * sf))
-        tk.Label(head, text="拖资源包进窗口，或者点「打开文件」", bg=BG, fg=MUTED,
+        tk.Label(head, text="拖入资源包可预览，拖入游戏文件夹可扫描", bg=BG, fg=MUTED,
                  font=("Microsoft YaHei UI", 9)).pack(side="right")
 
         # 工具条卡片
@@ -305,8 +308,11 @@ class App(_TK_BASE):
 
         self.btn_open = RoundButton(inner, "打开文件", self.choose_file, "primary")
         self.btn_open.pack(side="left")
-        self.btn_batch = RoundButton(inner, "批量解包文件夹", self.choose_folder, "secondary")
+        self.btn_batch = RoundButton(inner, "扫描文件夹", self.choose_folder, "secondary")
         self.btn_batch.pack(side="left", padx=(int(8 * sf), 0))
+        self.btn_results = RoundButton(inner, "扫描结果", self._show_scan_results, "secondary")
+        self.btn_results.pack(side="left", padx=(int(8 * sf), 0))
+        self.btn_results.set_enabled(False)
 
         tk.Frame(inner, bg=BORDER, width=1, height=int(24 * sf)).pack(
             side="left", padx=int(14 * sf), pady=int(4 * sf))
@@ -431,32 +437,35 @@ class App(_TK_BASE):
             except Exception:
                 pass
         if ok:
-            self.log_line("拖拽已启用：拖进来只打开列表，解哪些由主人自己选")
+            self.log_line("可拖入游戏文件夹扫描资源包，或拖入单个包预览。")
         else:
             self.log_line("拖拽注册失败，用「打开文件」也一样能用")
 
     def on_drop(self, event):
         try:
-            paths = [p for p in self.tk.splitlist(event.data) if os.path.isfile(p)]
-        except Exception:
-            paths = []
-            p = event.data.strip().strip("{}")
-            if os.path.isfile(p):
-                paths = [p]
+            paths = self.tk.splitlist(event.data)
+        except tk.TclError:
+            paths = [event.data.strip().strip("{}")]
         if paths:
             self.after(10, lambda: self._handle_dropped(paths))
+            return "copy"
+        return "refuse_drop"
 
-    def _handle_dropped(self, paths: list[str]):
-        if self._closing:
+    def _handle_dropped(self, paths):
+        if self._closing or self._update_dialog is not None or self._scan_dialog is not None:
             return
         if self.busy:
-            messagebox.showinfo(APP_NAME, "正在解包，等这一轮跑完再拖新的吧")
+            messagebox.showinfo(APP_NAME, "请等当前任务完成，或先点「取消」。")
+            return
+        paths = [p for p in paths if os.path.exists(p)]
+        if not paths:
             return
         self.log_line("拖进来：" + "、".join(os.path.basename(p) for p in paths))
-        if len(paths) == 1:
+        if any(os.path.isdir(p) for p in paths):
+            self._start_scan(paths)
+        elif len(paths) == 1:
             self.open_file(paths[0])          # 只打开，不自动解
-            return
-        if len(paths) > 1:
+        else:
             base = self._ask_target(batch=True)
             if not base:
                 return
@@ -495,16 +504,16 @@ class App(_TK_BASE):
 
     # ------------------------------------------------------------ 打开文件
     def choose_file(self):
-        if self._closing or self._update_dialog is not None:
+        if self.busy or self._closing or self._update_dialog is not None or self._scan_dialog is not None:
             return
         path = filedialog.askopenfilename(
             title="打开文件",
-            filetypes=[("资源包", "*.afa *.ald *.xp3 *.zip *.ypf *.npa *.pfs *.pf6 *.pf7 *.pf8 *.g00 *.pak *.dat *.arc *.bin"),
+            filetypes=[("资源包", "*.afa *.ald *.xp3 *.zip *.ypf *.npa *.pfs *.pf6 *.pf7 *.pf8 *.g00 *.pak *.dat *.arc *.bin *.exe"),
                        ("所有文件", "*.*")])
         if path:
             self.open_file(path)
 
-    def open_file(self, path: str) -> bool:
+    def open_file(self, path: str, *, parent=None) -> bool:
         if self._closing:
             return False
         if self.busy:
@@ -513,13 +522,13 @@ class App(_TK_BASE):
         try:
             archive, err = open_archive_ex(path)
         except Exception as e:
-            messagebox.showerror(APP_NAME, f"打开失败：{e}")
+            messagebox.showerror(APP_NAME, f"打开失败：{e}", parent=parent or self)
             return False
         if archive is None:
             head = _hex_head(path)
             messagebox.showerror(
                 APP_NAME,
-                f"识别不了这个格式\n\n{err}\n\n文件头（前 32 字节）：\n{head}")
+                f"识别不了这个格式\n\n{err}\n\n文件头（前 32 字节）：\n{head}", parent=parent or self)
             return False
         if self.archive and self.archive is not self._preview_archive:
             self.archive.close()
@@ -641,7 +650,7 @@ class App(_TK_BASE):
         if img is None:
             self.canvas.create_text(
                 w // 2, h // 2,
-                text="拖资源包进来\n然后在左边选一张",
+                text="拖入资源包预览图片\n或拖入游戏文件夹扫描",
                 fill="#5c6678", justify="center",
                 font=("Microsoft YaHei UI", int(11 * self.sf)))
             return
@@ -671,13 +680,13 @@ class App(_TK_BASE):
         label = "默认保存路径" if self.var_ask.get() else "保存路径"
         self._display_save_path(label, self._suggested_target())
 
-    def _ask_target(self, *, batch=False) -> str | None:
+    def _ask_target(self, *, batch=False, parent=None) -> str | None:
         if self._closing or self._update_dialog is not None:
             return None
         if not self.var_ask.get():
             return self._suggested_target(batch)
         init = self.out_dir if os.path.isdir(self.out_dir) else app_dir()
-        d = filedialog.askdirectory(title="解出来的图片保存到哪里", initialdir=init)
+        d = filedialog.askdirectory(title="解出来的图片保存到哪里", initialdir=init, parent=parent or self)
         if not d:
             return None
         self.out_dir = os.path.abspath(d)
@@ -750,29 +759,105 @@ class App(_TK_BASE):
         threading.Thread(target=work, daemon=True).start()
 
     def choose_folder(self):
-        if self.busy or self._closing or self._update_dialog is not None:
+        if self.busy or self._closing or self._update_dialog is not None or self._scan_dialog is not None:
             return
-        folder = filedialog.askdirectory(title="选择存放资源包的文件夹")
-        if not folder:
-            return
-        files = []
-        for root, _dirs, names in os.walk(folder):
-            for n in names:
-                if os.path.splitext(n)[1].lower() in ARCHIVE_EXTS:
-                    files.append(os.path.join(root, n))
-        if not files:
-            messagebox.showinfo(APP_NAME, "这个文件夹里没找到资源包")
-            return
-        if not messagebox.askyesno(APP_NAME, f"找到 {len(files)} 个资源包，全部解一遍？"):
-            return
-        base = self._ask_target(batch=True)
-        if not base:
-            return
-        self._start_batch(files, base)
+        folder = filedialog.askdirectory(title="选择要扫描的游戏文件夹", parent=self)
+        if folder:
+            self._start_scan([folder])
 
-    def _start_batch(self, files, base_dir):
+    def _start_scan(self, paths):
+        roots = [os.path.abspath(p if os.path.isdir(p) else os.path.dirname(p)) for p in paths]
+        try:
+            self._scan_root = os.path.commonpath(roots)
+        except ValueError:  # 同时拖入不同盘符下的文件夹时显示完整路径
+            self._scan_root = ""
+        self._scan_results = []
+        self.btn_results.set_text("扫描结果")
+        self.btn_results.set_enabled(False)
+        self.stop_event.clear()
+        self._set_busy(True)
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
+        self.set_status("正在扫描文件夹…")
+        self.log_line("扫描目录及其子文件夹中的资源包…")
+
+        def work():
+            try:
+                result = scan_archives(paths, should_stop=self.stop_event.is_set,
+                                       progress=lambda n, found, path: self.queue.put(
+                                           ("scan_progress", n, found, path)))
+            except Exception:
+                self.queue.put(("scan_error", traceback.format_exc()))
+            else:
+                self.queue.put(("scan_done", result))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_scan(self, msg):
+        self.progress.stop()
+        self.progress.configure(mode="determinate", value=0)
+        self._set_busy(False)
+        if self._closing:
+            return
+        if msg[0] == "scan_error":
+            self.set_status("扫描失败，详情见日志")
+            self.log_line(msg[1])
+            messagebox.showerror(APP_NAME, "扫描失败，详情见窗口下方日志。", parent=self)
+            return
+        result = msg[1]
+        self._scan_results = result.archives
+        count = len(result.archives)
+        cancelled = result.cancelled or self.stop_event.is_set()
+        status = "扫描已取消" if cancelled else "扫描完成"
+        summary = f"{status} · 已检查 {result.scanned} 个文件，识别到 {count} 个资源包"
+        if result.unreadable:
+            summary += f" · {result.unreadable} 项无法读取"
+        self.set_status(summary)
+        self.log_line(summary)
+        self.btn_results.set_text(f"扫描结果 ({count})")
+        self.btn_results.set_enabled(bool(count))
+        if not cancelled:
+            if count:
+                self._show_scan_results()
+            else:
+                messagebox.showinfo(APP_NAME, summary, parent=self)
+
+    def _show_scan_results(self):
+        if self.busy or self._closing or self._update_dialog is not None or not self._scan_results:
+            return
+        if self._scan_dialog is None:
+            self._scan_dialog = ScanDialog(self, self._scan_results, self._scan_root)
+        self._scan_dialog.lift()
+
+    @staticmethod
+    def _batch_output_names(files):
+        from unpacker.extract import safe_parts
+
+        stems = {path: safe_parts(os.path.splitext(os.path.basename(path))[0])[-1]
+                 for path in files}
+        reserved = {stem.casefold() for stem in stems.values()}
+        next_suffix = {}
+        names = {}
+        # 按源路径分配编号，保留本身就叫 “data (2)” 的包名。
+        for path in sorted(stems, key=lambda p: (os.path.abspath(p).casefold(), os.fspath(p))):
+            stem = stems[path]
+            key = stem.casefold()
+            suffix = next_suffix.get(key, 1)
+            name = stem
+            if suffix > 1:
+                name = f"{stem} ({suffix})"
+                while name.casefold() in reserved:
+                    suffix += 1
+                    name = f"{stem} ({suffix})"
+                reserved.add(name.casefold())
+            next_suffix[key] = suffix + 1
+            names[path] = name
+        return names
+
+    def _start_batch(self, files, base_dir, *, all_scan_paths=None):
         if self.busy or self._closing or self._update_dialog is not None:
             return
+        names = self._batch_output_names(all_scan_paths if all_scan_paths is not None else files)
         self._display_save_path("批量保存路径", base_dir)
         self.stop_event.clear()
         self._set_busy(True)
@@ -783,44 +868,50 @@ class App(_TK_BASE):
         stop = self.stop_event.is_set
 
         def work():
-            ok = 0
-            imgs = 0
+            ok = failed = converted = raw = 0
             for i, f in enumerate(files, 1):
                 if stop():
-                    self.queue.put(("log", "批量任务已取消"))
                     break
                 self.queue.put(("progress", i - 1, len(files), os.path.basename(f)))
-                arc = None
                 try:
-                    arc, err = open_archive_ex(f)
+                    arc, err = open_archive_ex(f, should_stop=stop)
                     if arc is None:
-                        self.queue.put(("log", f"× {os.path.basename(f)}: {err}"))
-                        continue
-                    stem = os.path.splitext(os.path.basename(f))[0]
+                        if stop():
+                            break
+                        raise ValueError(err)
                     opts = ExtractOptions(
-                        out_dir=os.path.join(base_dir, stem),
+                        out_dir=os.path.join(base_dir, names[f]),
                         base_dir=base_dir,
                         only_images=only_img,
                         convert_png=png,
                         should_stop=stop,
                     )
-                    stats = extract(arc, arc.entries, opts)
-                    ok += 1
-                    imgs += stats.converted
-                    self.queue.put(("log", f"√ {os.path.basename(f)}  {stats.summary()}"))
+                    with arc:
+                        stats = extract(arc, arc.entries, opts)
+                    converted += stats.converted
+                    raw += stats.raw
+                    processed = stats.converted + stats.raw + stats.skipped + stats.failed
+                    if processed < len(arc.entries):
+                        self.queue.put(("log", f"已中止 {f} → {names[f]}　{stats.summary()}"))
+                        break
+                    if stats.failed:
+                        failed += 1
+                        mark = "×"
+                    else:
+                        ok += 1
+                        mark = "√"
+                    self.queue.put(("log", f"{mark} {f} → {names[f]}　{stats.summary()}"))
                 except Exception as e:
-                    self.queue.put(("log", f"× {os.path.basename(f)}: {e}"))
-                finally:
-                    if arc:
-                        arc.close()
-            self.queue.put(("batch_done", ok, len(files), imgs, base_dir))
+                    failed += 1
+                    self.queue.put(("log", f"× {f}: {e}"))
+            self.queue.put(("batch_done", ok, failed, len(files), converted, raw, base_dir))
 
         threading.Thread(target=work, daemon=True).start()
 
     def cancel(self):
         if self.busy:
             self.stop_event.set()
-            self.log_line("收到取消指令，这一张处理完就停…")
+            self.log_line("正在取消，处理完当前文件后停止…")
 
     def _set_busy(self, busy: bool):
         self.busy = busy
@@ -872,6 +963,11 @@ class App(_TK_BASE):
                 kind = msg[0]
                 if kind.startswith("update_"):
                     self._handle_update(msg)
+                elif kind == "scan_progress":
+                    _, scanned, found, path = msg
+                    self.set_status(f"正在扫描 · 已检查 {scanned} 个文件，找到 {found} 个包  {os.path.basename(path)}")
+                elif kind in ("scan_done", "scan_error"):
+                    self._finish_scan(msg)
                 elif kind == "progress":
                     _, done, total, name = msg
                     self.progress.configure(maximum=max(1, total), value=done)
@@ -900,13 +996,18 @@ class App(_TK_BASE):
                     if not self._closing and messagebox.askyesno(APP_NAME, f"解包完成\n\n{stats.summary()}\n\n保存路径\n{out_dir}\n\n打开目录看看？"):
                         os.startfile(out_dir)  # noqa: S606
                 elif kind == "batch_done":
-                    _, ok, total, imgs, base_dir = msg
-                    self.progress.configure(value=self.progress["maximum"])
-                    self.log_line(f"批量完成：{ok}/{total} 个包，共 {imgs} 张图")
-                    self.set_status(f"批量完成：{ok}/{total} 个包")
+                    _, ok, failed, total, converted, raw, base_dir = msg
+                    title = "批量解包已取消" if ok + failed < total else "批量解包结束"
+                    summary = f"{total} 个包，成功 {ok} 个，失败 {failed} 个"
+                    if ok + failed < total:
+                        summary += f"，未完成 {total - ok - failed} 个"
+                    exports = f"转换 {converted} 张图片，原样导出 {raw} 个文件"
+                    self.progress.configure(value=ok + failed)
+                    self.log_line(f"{title}：{summary}。{exports}")
+                    self.set_status(f"{title}：{summary}")
                     self._set_busy(False)
                     if not self._closing:
-                        messagebox.showinfo(APP_NAME, f"批量解包完成\n{ok}/{total} 个包，共导出 {imgs} 张图\n\n批量保存路径\n{base_dir}")
+                        messagebox.showinfo(APP_NAME, f"{title}\n{summary}\n{exports}\n\n批量保存路径\n{base_dir}")
                 elif kind == "error":
                     self._set_busy(False)
                     self.log_line("出错了：\n" + msg[1])
@@ -1123,9 +1224,8 @@ class App(_TK_BASE):
 
 def main():
     app = App()
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        path = sys.argv[1]
-        app.after(120, lambda: app.open_file(path))
+    if sys.argv[1:]:
+        app.after(120, lambda: app._handle_dropped(sys.argv[1:]))
 
     shot = os.environ.get("GU_SELFTEST")
     if shot:

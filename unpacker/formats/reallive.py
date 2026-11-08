@@ -22,13 +22,15 @@ import re
 import struct
 
 from ..core import Archive, Entry
-from ..images_g00 import frame_image, lz_decompress, valid_canvas, MAX_OUT
+from ..images_g00 import frame_image, lz_decompress, parse_meta, valid_canvas, MAX_OUT
 from ..registry import register_archive
 
 MAX_FRAMES = 0x1000
 SCAN_EXTS = (".dat", ".g00")
 
-_MAGIC = re.compile(rb"[\x00\x01\x02]")
+_SCAN_CHUNK = 256 * 1024
+# 类型 0/1/2 后的两个小端尺寸都必须非零。用前瞻保留重叠的候选头。
+_MAGIC = re.compile(rb"[\x00-\x02](?!\x00\x00)(?=..(?!\x00\x00))", re.DOTALL)
 
 
 class G00Archive(Archive):
@@ -111,75 +113,67 @@ def _open_container(view):
     return G00Archive(view, entries, blob, width, height, count)
 
 
-def _g00_at(data: bytes, offset: int):
+def _g00_at(data, offset: int):
     """offset 处如果是一个完整的 g00，返回 (size, type, width, height)，否则 None"""
-    total = len(data)
-    if offset < 0 or offset + 9 > total:
+    if offset < 0 or offset + 9 > len(data):
         return None
-    gtype = data[offset]
-    width = struct.unpack_from("<H", data, offset + 1)[0]
-    height = struct.unpack_from("<H", data, offset + 3)[0]
-    if not valid_canvas(width, height):
-        return None
-
-    if gtype == 2:
-        count = struct.unpack_from("<i", data, offset + 5)[0]
-        if count <= 0 or count > MAX_FRAMES:
+    with memoryview(data)[offset:] as frame:
+        meta = parse_meta(frame)
+        if meta is None:
             return None
-        index_end = offset + 9 + count * 0x18
-        if index_end + 8 > total:
+        gtype = meta["type"]
+        pos = meta.get("data_offset", 5)
+        packed, out_size = struct.unpack_from("<II", frame, pos)
+        # 伪头在大型 DAT 中并不少见。验证 LZ 正文的开头，避免为随机长度分配内存。
+        prefix = lz_decompress(frame, pos, 1 if gtype == 0 else 2,
+                               3 if gtype == 0 else 1, max_symbols=128)
+        if prefix is None:
             return None
-        packed = struct.unpack_from("<I", data, index_end)[0]
-        out_size = struct.unpack_from("<I", data, index_end + 4)[0]
-        if packed < 8 or out_size < 4 + count * 8 or out_size > MAX_OUT:
+        if gtype == 2 and struct.unpack_from("<i", prefix)[0] != meta["count"]:
             return None
-        size = index_end - offset + packed
-        if offset + size > total:
-            return None
-        return size, gtype, width, height
-
-    length = struct.unpack_from("<I", data, offset + 5)[0]
-    if length < 8:
-        return None
-    size = 5 + length
-    if offset + size > total:
-        return None
-    out_size = struct.unpack_from("<I", data, offset + 9)[0]
-    if out_size > MAX_OUT:
-        return None
-    if gtype == 0:
-        if out_size < width * height * 3:
-            return None
-    else:
-        need = width * height
-        if out_size < need + 2 or out_size > need + 2 + 256 * 4 + 0x1000:
-            return None
-    return size, gtype, width, height
+        if gtype == 1:
+            colors = struct.unpack_from("<H", prefix)[0]
+            if not 0 < colors <= 256 or 2 + 4 * colors + meta["width"] * meta["height"] > out_size:
+                return None
+        return pos + packed, gtype, meta["width"], meta["height"]
 
 
 def _scan_dat(view) -> list[Entry]:
     """在 .dat 里扫内嵌的 g00；找到的条目指向文件里的真实偏移"""
-    data = view.bytes(0, view.size)
     entries: list[Entry] = []
-    next_pos = 0
-    for match in _MAGIC.finditer(data):
-        offset = match.start()
-        if offset < next_pos:
-            continue
-        hit = _g00_at(data, offset)
-        if hit is None:
-            continue
-        size, gtype, width, height = hit
-        entries.append(Entry(
-            f"{len(entries) + 1:04d}.g00", offset, size, kind="g00",
-            meta={"id": len(entries), "offset": offset, "g00_type": gtype,
-                  "width": width, "height": height, "image": True},
-        ))
-        next_pos = offset + size
+    start = 0
+    with view.buffer() as data:
+        while start < view.size:
+            if view.should_stop and view.should_stop():
+                return []
+            end = min(start + _SCAN_CHUNK, view.size)
+            # 多读四个字节供跨块文件头的宽高前瞻使用。
+            window = view.bytes(start, end - start + 4)
+            pos = 0
+            if window.count(0) != len(window):
+                while pos < end - start:
+                    match = _MAGIC.search(window, pos)
+                    if match is None:
+                        break
+                    offset = start + match.start()
+                    if offset >= end:
+                        break
+                    pos = match.start() + 1
+                    hit = _g00_at(data, offset)
+                    if hit is None:
+                        continue
+                    size, gtype, width, height = hit
+                    entries.append(Entry(
+                        f"{len(entries) + 1:04d}.g00", offset, size, kind="g00",
+                        meta={"id": len(entries), "offset": offset, "g00_type": gtype,
+                              "width": width, "height": height, "image": True},
+                    ))
+                    pos = match.start() + size
+            start = max(end, start + pos)
     return entries
 
 
-@register_archive("G00", "RealLive .dat")
+@register_archive("G00", "RealLive .dat", fallback=True)
 def detect(view):
     if view.size >= 9:
         archive = _open_container(view)
