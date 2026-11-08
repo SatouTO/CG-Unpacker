@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+/build/
+/dist/
+/*.spec
+/config.json
+/output/
+/_dpi_debug.txt
+/_internal/
+*.exe
+*.TMP
+*.zip
